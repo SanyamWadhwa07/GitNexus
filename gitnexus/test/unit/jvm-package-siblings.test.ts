@@ -9,6 +9,7 @@ import {
 } from '../../src/core/ingestion/languages/kotlin/package-siblings.js';
 import { setKotlinPackageFact } from '../../src/core/ingestion/languages/kotlin/package-facts.js';
 import type { JvmPackageFact } from '../../src/core/ingestion/languages/jvm/package-facts.js';
+import { createJvmPackageSiblingVisibility } from '../../src/core/ingestion/languages/jvm/package-siblings.js';
 
 interface LanguagePackageHarness {
   readonly label: string;
@@ -151,3 +152,109 @@ function moduleWithClass(
   }
   return { filePath, scopes } as unknown as ParsedFile;
 }
+
+// ─── top-level functions offered to sibling files ────────────────────
+
+describe('JVM package sibling functions', () => {
+  const fact: JvmPackageFact = { status: 'known', packageName: 'com.cap' };
+
+  const classDef = (filePath: string, name: string): SymbolDefinition =>
+    ({
+      nodeId: `Class:${filePath}:${name}`,
+      filePath,
+      type: 'Class',
+      qualifiedName: name,
+    }) as SymbolDefinition;
+
+  const functionDef = (filePath: string, name: string, overload: number): SymbolDefinition =>
+    ({
+      nodeId: `Function:${filePath}:${name}#${overload}`,
+      filePath,
+      type: 'Function',
+      qualifiedName: name,
+    }) as SymbolDefinition;
+
+  /** A file declaring `overloads` top-level functions named `name`. */
+  const functionFile = (filePath: string, index: number, name: string, overloads: number) => {
+    const parsed = moduleWithClass(filePath, index);
+    (parsed.scopes[0].bindings as Map<string, unknown>).set(
+      name,
+      Array.from({ length: overloads }, (_, overload) => ({
+        def: functionDef(filePath, name, overload),
+        origin: 'local',
+      })),
+    );
+    return parsed;
+  };
+
+  /** Names injected into `target`'s module scope, each with its def ids. */
+  const injectedInto = (
+    files: readonly ParsedFile[],
+    target: ParsedFile,
+    cap: string | undefined,
+    withFunctions = true,
+  ): { names: Record<string, string[]>; incomplete: boolean } => {
+    const previous = process.env.GITNEXUS_MAX_INJECTED_SIBLINGS;
+    if (cap === undefined) delete process.env.GITNEXUS_MAX_INJECTED_SIBLINGS;
+    else process.env.GITNEXUS_MAX_INJECTED_SIBLINGS = cap;
+    try {
+      const visibility = createJvmPackageSiblingVisibility({
+        languageLabel: 'test',
+        getPackageFact: () => fact,
+        mergeSiblingTypeBindings: false,
+        ...(withFunctions ? { includeTopLevelFunction: () => true } : {}),
+      });
+      const indexes = emptyIndexes();
+      visibility.populateNamespaceSiblings(files, indexes, {
+        fileContents: new Map(files.map((parsed) => [parsed.filePath, ''])),
+      });
+      const scopeAug = indexes.bindingAugmentations.get(target.scopes[0].id) ?? new Map();
+      const names: Record<string, string[]> = {};
+      for (const [name, refs] of scopeAug) names[name] = refs.map((ref) => ref.def.nodeId).sort();
+      return { names, incomplete: visibility.isVisibilityIncomplete(target.filePath) };
+    } finally {
+      if (previous === undefined) delete process.env.GITNEXUS_MAX_INJECTED_SIBLINGS;
+      else process.env.GITNEXUS_MAX_INJECTED_SIBLINGS = previous;
+    }
+  };
+
+  // The overloads sort first, so a shared budget would spend it on them.
+  const pickPath = 'src/main/kotlin/com/cap/A0Pick.kt';
+  const caller = moduleWithClass('src/main/kotlin/com/cap/Caller.kt', 3);
+  const files = [
+    functionFile(pickPath, 0, 'pick', 2),
+    moduleWithClass(
+      'src/main/kotlin/com/cap/Alpha.kt',
+      1,
+      classDef('src/main/kotlin/com/cap/Alpha.kt', 'Alpha'),
+    ),
+    moduleWithClass(
+      'src/main/kotlin/com/cap/Beta.kt',
+      2,
+      classDef('src/main/kotlin/com/cap/Beta.kt', 'Beta'),
+    ),
+    caller,
+  ];
+
+  it('offers functions on a budget of their own, after the classes', () => {
+    const classesOnly = injectedInto(files, caller, '2', false);
+    const { names } = injectedInto(files, caller, '2');
+    expect(Object.keys(classesOnly.names).sort()).toEqual(['Alpha', 'Beta']);
+    expect(names.Alpha).toEqual(classesOnly.names.Alpha);
+    expect(names.Beta).toEqual(classesOnly.names.Beta);
+    expect(names.pick).toEqual([`Function:${pickPath}:pick#0`, `Function:${pickPath}:pick#1`]);
+  });
+
+  it('injects an overload group whole or not at all', () => {
+    const { names, incomplete } = injectedInto(files, caller, '1');
+    expect(names.pick).toBeUndefined();
+    expect(incomplete).toBe(true);
+  });
+
+  it('does not offer a test source set function to production code', () => {
+    const samples = functionFile('src/test/kotlin/com/cap/Samples.kt', 4, 'sample', 1);
+    const withTest = [...files, samples];
+    expect(injectedInto(withTest, caller, undefined).names.sample).toBeUndefined();
+    expect(injectedInto(withTest, samples, undefined).names.pick).toHaveLength(2);
+  });
+});

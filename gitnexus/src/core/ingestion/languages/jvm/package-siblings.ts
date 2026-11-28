@@ -40,8 +40,10 @@ export interface JvmPackageSiblingOptions {
    * either way.
    */
   readonly mergeSiblingTypeBindings?: boolean;
-  /** Also make top-level functions visible to the package's other files. */
-  readonly includeTopLevelFunctions?: boolean;
+  /** Also make the top-level functions this accepts visible to the package's
+   *  other files. Functions get an injection budget of their own, after the
+   *  classes, and a name's overloads are injected together or not at all. */
+  readonly includeTopLevelFunction?: (def: SymbolDefinition) => boolean;
 }
 
 export interface JvmPackageSiblingVisibility {
@@ -196,6 +198,7 @@ export function createJvmPackageSiblingVisibility(
       }
 
       const classDefs: SiblingCandidate[] = [];
+      const functionDefs: SiblingCandidate[] = [];
       for (const parsed of bucket.parsed) {
         const moduleScopeId = parsed.scopes.find((scope) => scope.kind === 'Module')?.id;
         for (const scope of parsed.scopes) {
@@ -205,12 +208,17 @@ export function createJvmPackageSiblingVisibility(
           );
           if (def !== undefined) classDefs.push({ def, filePath: parsed.filePath });
         }
-        if (options.includeTopLevelFunctions === true) {
+        if (options.includeTopLevelFunction !== undefined) {
           const moduleScope = parsed.scopes.find((scope) => scope.id === moduleScopeId);
           for (const refs of moduleScope?.bindings.values() ?? []) {
             for (const { def, origin } of refs) {
-              if (origin === 'local' && def.type === 'Function' && def.filePath === parsed.filePath)
-                classDefs.push({ def, filePath: parsed.filePath });
+              if (
+                origin === 'local' &&
+                def.type === 'Function' &&
+                def.filePath === parsed.filePath &&
+                options.includeTopLevelFunction(def)
+              )
+                functionDefs.push({ def, filePath: parsed.filePath });
             }
           }
         }
@@ -242,6 +250,7 @@ export function createJvmPackageSiblingVisibility(
       // Proximity depends only on the two paths, so files sharing a directory
       // share one ranking; rank once per directory instead of once per file.
       const rankingByDirectory = new Map<string, DirectoryRanking>();
+      const functionRankingByDirectory = new Map<string, DirectoryRanking>();
 
       for (const { filePath, scope } of bucket.moduleScopes) {
         let scopeAug = augmentations.get(scope.id);
@@ -253,11 +262,6 @@ export function createJvmPackageSiblingVisibility(
         const ownSegments = segmentsByPath.get(filePath) ?? pathSegments(filePath);
         const dirSegments = ownSegments.slice(0, -1);
         const dirKey = `${dirSegments.length}:${dirSegments.join('/')}`;
-        let ranking = rankingByDirectory.get(dirKey);
-        if (ranking === undefined) {
-          ranking = rankForDirectory(classDefs, dirSegments, segmentsByPath);
-          rankingByDirectory.set(dirKey, ranking);
-        }
         // Nearest-first by shared path prefix. Ties (the common case in a flat
         // package, where every sibling shares the same directory) keep the
         // walker's traversal order, so the retained set is deterministic but
@@ -267,11 +271,22 @@ export function createJvmPackageSiblingVisibility(
         // continues past the directory with this file's own name (a directory
         // named like the file, or a path spelling that normalizes to it): that
         // candidate shares one more segment, so rank this file on its own.
-        const sameNamePaths = ranking.pathsByNextSegment.get(ownSegments[ownSegments.length - 1]);
-        const candidates =
-          sameNamePaths !== undefined && (sameNamePaths.size > 1 || !sameNamePaths.has(filePath))
-            ? rankByProximity(classDefs, filePath, ownSegments, segmentsByPath)
+        const rankFor = (
+          defs: readonly SiblingCandidate[],
+          rankings: Map<string, DirectoryRanking>,
+        ): readonly SiblingCandidate[] => {
+          let ranking = rankings.get(dirKey);
+          if (ranking === undefined) {
+            ranking = rankForDirectory(defs, dirSegments, segmentsByPath);
+            rankings.set(dirKey, ranking);
+          }
+          const sameNamePaths = ranking.pathsByNextSegment.get(ownSegments[ownSegments.length - 1]);
+          return sameNamePaths !== undefined &&
+            (sameNamePaths.size > 1 || !sameNamePaths.has(filePath))
+            ? rankByProximity(defs, filePath, ownSegments, segmentsByPath)
             : ranking.ordered;
+        };
+        const candidates = rankFor(classDefs, rankingByDirectory);
 
         const injectedIds = new Set<string>();
         const injectedPaths = new Set<string>();
@@ -293,7 +308,35 @@ export function createJvmPackageSiblingVisibility(
           bindings.push({ def, origin: 'namespace' });
         }
 
-        if (truncated) {
+        // After the classes and on a budget of their own, so the classes a file
+        // was offered do not depend on how many functions its package declares.
+        // A name's overloads go in together: with only some of them visible,
+        // every call of that name binds to those few.
+        let functionsTruncated = false;
+        if (functionDefs.length > 0) {
+          const overloads = new Map<string, SiblingCandidate[]>();
+          for (const candidate of rankFor(functionDefs, functionRankingByDirectory)) {
+            const name = candidate.def.qualifiedName;
+            if (candidate.filePath === filePath || name === undefined) continue;
+            if (!isJvmSourceVisible(filePath, candidate.filePath)) continue;
+            const group = overloads.get(name);
+            if (group === undefined) overloads.set(name, [candidate]);
+            else group.push(candidate);
+          }
+          let injectedFunctions = 0;
+          for (const [name, group] of overloads) {
+            if (maxInjectedSiblings > 0 && injectedFunctions + group.length > maxInjectedSiblings) {
+              functionsTruncated = true;
+              break;
+            }
+            injectedFunctions += group.length;
+            const bindings = scopeAug.get(name) ?? [];
+            if (!scopeAug.has(name)) scopeAug.set(name, bindings);
+            for (const { def } of group) bindings.push({ def, origin: 'namespace' });
+          }
+        }
+
+        if (truncated || functionsTruncated) {
           // Sibling visibility for this file is now partial, and downstream
           // Spring attribution treats a complete flag as "this package's names
           // are fully known". Marking it incomplete keeps wildcard attribution

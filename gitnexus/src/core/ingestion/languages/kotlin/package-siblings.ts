@@ -1,12 +1,13 @@
 import { createJvmPackageSiblingVisibility } from '../jvm/package-siblings.js';
 import { getKotlinPackageFact } from './package-facts.js';
+import { isKotlinPackageFunction } from './capture-side-channel.js';
 import type { BindingRef, ScopeId } from 'gitnexus-shared';
 import { isClassLike } from '../../scope-resolution/scope/walkers.js';
 
 const kotlinPackageSiblingVisibility = createJvmPackageSiblingVisibility({
   languageLabel: 'kotlin',
   getPackageFact: getKotlinPackageFact,
-  includeTopLevelFunctions: true,
+  includeTopLevelFunction: isKotlinPackageFunction,
 });
 
 export const populateKotlinPackageSiblings: typeof kotlinPackageSiblingVisibility.populateNamespaceSiblings =

@@ -15,12 +15,13 @@ import { computeKotlinArityMetadata } from './arity-metadata.js';
 import { splitKotlinImportHeader } from './import-decomposer.js';
 import { recordKotlinCacheHit, recordKotlinCacheMiss } from './cache-stats.js';
 import { KOTLIN_QUALIFIED_CALLEE_TAG, normalizeKotlinType } from './interpret.js';
-import { synthesizeKotlinReceiverBinding } from './receiver-binding.js';
+import { extensionReceiverType, synthesizeKotlinReceiverBinding } from './receiver-binding.js';
 import { getKotlinParser, getKotlinScopeQuery } from './query.js';
 import { collectKotlinNameClaims } from './lexical-bindings.js';
 import { markCompanionScope } from './companion-scopes.js';
 import {
   setKotlinClassAnnotationFacts,
+  setKotlinPackageFunctions,
   setKotlinSpringAopFacts,
   setKotlinSpringConditionalFacts,
   setKotlinSpringDiFacts,
@@ -159,6 +160,7 @@ export function emitKotlinScopeCaptures(
   const springDiClassNodeIds = new Set<number>();
   const springDynamicLookupFacts: SpringDynamicLookupFact[] = [];
   const springMessageProducerFacts: SpringMessageProducerFact[] = [];
+  const packageFunctionPositions: string[] = [];
   const springMemberCallNodeIds = new Set<number>();
   const returnTypes = collectKotlinReturnTypeTexts(tree.rootNode);
   out.push(...synthesizeKotlinLocalAssignmentBindings(tree.rootNode, returnTypes));
@@ -440,6 +442,9 @@ export function emitKotlinScopeCaptures(
     if (declTag !== undefined) {
       const fnNode = nodeIfType(groupedNodes[declTag], 'function_declaration');
       if (fnNode !== null) {
+        const nameRange = grouped['@declaration.name']?.range;
+        if (nameRange !== undefined && isPackageCallableFunction(fnNode))
+          packageFunctionPositions.push(`${nameRange.startLine}:${nameRange.startCol}`);
         const arity = computeKotlinArityMetadata(fnNode);
         if (arity.parameterCount !== undefined) {
           grouped['@declaration.parameter-count'] = syntheticCapture(
@@ -508,9 +513,20 @@ export function emitKotlinScopeCaptures(
     captureKotlinSpringConfigConsumerFacts(tree.rootNode, filePath),
   );
   setKotlinSpringMessageProducerFacts(filePath, springMessageProducerFacts);
+  setKotlinPackageFunctions(filePath, packageFunctionPositions);
   out.push(...synthesizeLombokAccessorCaptures(tree.rootNode));
   out.push(...synthesizeCallableFlowCaptures(tree.rootNode, KOTLIN_CALLABLE_CAPTURE_OPTIONS));
   return out;
+}
+
+/** A top-level function that another file of the package can call without a
+ *  receiver: `private` makes it file-private, and an extension needs one. */
+function isPackageCallableFunction(fnNode: SyntaxNode): boolean {
+  if (fnNode.parent?.type !== 'source_file' || extensionReceiverType(fnNode) !== null) return false;
+  const modifiers = fnNode.namedChildren.find((child) => child.type === 'modifiers');
+  return !modifiers?.namedChildren.some(
+    (child) => child.type === 'visibility_modifier' && child.text === 'private',
+  );
 }
 
 function isKotlinBeanCandidateClass(classNode: SyntaxNode): boolean {

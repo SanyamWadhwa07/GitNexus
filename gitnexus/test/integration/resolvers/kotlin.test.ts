@@ -3208,4 +3208,24 @@ describe('Kotlin same-package top-level function calls', () => {
       'formatCents → src/main/kotlin/com/acme/other/Fmt.kt',
     ]);
   });
+
+  it('does not offer a private function to another file', () => {
+    expect(targetsOf('round')).toEqual([]);
+  });
+
+  it('does not offer a test source set function to production code', () => {
+    expect(targetsOf('samples')).toEqual([]);
+  });
+
+  it('does not bind a call without a receiver to an extension function', () => {
+    expect(targetsOf('label')).toEqual([]);
+  });
+
+  it('lets a test source set call production functions of its package', () => {
+    expect(targetsOf('closes')).toEqual([
+      `computeTotal → ${billing}/Money.kt`,
+      `formatCents → ${billing}/Money.kt`,
+      'sampleAmounts → src/test/kotlin/com/acme/billing/Samples.kt',
+    ]);
+  });
 });

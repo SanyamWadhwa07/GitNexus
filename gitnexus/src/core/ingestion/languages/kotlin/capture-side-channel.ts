@@ -37,7 +37,7 @@
  * foreign-shaped snapshot.
  */
 
-import type { ParsedFile, ScopeId } from 'gitnexus-shared';
+import type { ParsedFile, ScopeId, SymbolDefinition } from 'gitnexus-shared';
 import {
   createClassAnnotationFactStore,
   type ClassAnnotationFact,
@@ -69,6 +69,7 @@ const springDynamicLookupFacts = new Map<string, readonly SpringDynamicLookupFac
 const springNonHttpHandlerFacts = new Map<string, readonly KotlinSpringNonHttpHandlerFact[]>();
 const springConfigConsumerFacts = new Map<string, readonly KotlinSpringConfigConsumerFact[]>();
 const springMessageProducerFacts = new Map<string, readonly SpringMessageProducerFact[]>();
+const packageFunctions = new Map<string, ReadonlySet<string>>();
 
 /**
  * Plain JSON-serializable snapshot of the per-file Kotlin capture-time
@@ -100,6 +101,10 @@ export interface KotlinCaptureSideChannel {
   readonly springConfigConsumerFacts?: readonly KotlinSpringConfigConsumerFact[];
   /** Messaging-template publish syntax captured per callable. */
   readonly springMessageProducerFacts?: readonly SpringMessageProducerFact[];
+  /** Name positions (`line:col`) of the top-level functions other files of the
+   *  package may call without a receiver: neither `private` nor extensions.
+   *  Absent in older carriers, which offer no functions to sibling files. */
+  readonly packageFunctions?: readonly string[];
 }
 
 export function clearKotlinClassAnnotationFacts(): void {
@@ -111,6 +116,7 @@ export function clearKotlinClassAnnotationFacts(): void {
   springNonHttpHandlerFacts.clear();
   springConfigConsumerFacts.clear();
   springMessageProducerFacts.clear();
+  packageFunctions.clear();
 }
 
 export function setKotlinSpringAopFacts(
@@ -218,6 +224,21 @@ export function getKotlinSpringMessageProducerFacts(
   return springMessageProducerFacts.get(filePath) ?? [];
 }
 
+export function setKotlinPackageFunctions(filePath: string, positions: readonly string[]): void {
+  if (positions.length === 0) packageFunctions.delete(filePath);
+  else packageFunctions.set(filePath, new Set(positions));
+}
+
+/** Whether `def` is a top-level function that other files of its package may
+ *  call without a receiver. */
+export function isKotlinPackageFunction(def: SymbolDefinition): boolean {
+  const range = def.nameRange;
+  return (
+    range !== undefined &&
+    packageFunctions.get(def.filePath)?.has(`${range.startLine}:${range.startCol}`) === true
+  );
+}
+
 /**
  * `LanguageProvider.collectCaptureSideChannel` implementation for Kotlin.
  * Returns `undefined` when this file recorded no side-channel state at all, so
@@ -236,6 +257,7 @@ export function collectKotlinCaptureSideChannel(
   const configConsumerFacts = springConfigConsumerFacts.get(filePath) ?? [];
   const messageProducerFacts = springMessageProducerFacts.get(filePath) ?? [];
   const packageFact = getKotlinPackageFact(filePath);
+  const functionPositions = [...(packageFunctions.get(filePath) ?? [])];
   if (
     companionScopes.length === 0 &&
     annotationFacts.length === 0 &&
@@ -246,6 +268,7 @@ export function collectKotlinCaptureSideChannel(
     nonHttpHandlerFacts.length === 0 &&
     configConsumerFacts.length === 0 &&
     messageProducerFacts.length === 0 &&
+    functionPositions.length === 0 &&
     packageFact === undefined
   ) {
     return undefined;
@@ -267,6 +290,7 @@ export function collectKotlinCaptureSideChannel(
     ...(messageProducerFacts.length > 0
       ? { springMessageProducerFacts: messageProducerFacts }
       : {}),
+    ...(functionPositions.length > 0 ? { packageFunctions: functionPositions } : {}),
   };
 }
 
@@ -296,6 +320,7 @@ export function applyKotlinCaptureSideChannel(parsed: ParsedFile): void {
     setKotlinSpringNonHttpHandlerFacts(parsed.filePath, []);
     setKotlinSpringConfigConsumerFacts(parsed.filePath, []);
     setKotlinSpringMessageProducerFacts(parsed.filePath, []);
+    setKotlinPackageFunctions(parsed.filePath, []);
     setKotlinPackageFact(parsed.filePath, UNKNOWN_JVM_PACKAGE_FACT);
     return;
   }
@@ -335,6 +360,10 @@ export function applyKotlinCaptureSideChannel(parsed: ParsedFile): void {
   setKotlinSpringMessageProducerFacts(
     parsed.filePath,
     Array.isArray(data.springMessageProducerFacts) ? data.springMessageProducerFacts : [],
+  );
+  setKotlinPackageFunctions(
+    parsed.filePath,
+    Array.isArray(data.packageFunctions) ? data.packageFunctions : [],
   );
   setKotlinPackageFact(
     parsed.filePath,

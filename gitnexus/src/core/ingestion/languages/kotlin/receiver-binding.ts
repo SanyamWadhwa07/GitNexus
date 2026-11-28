@@ -39,7 +39,7 @@ function findFunctionBody(fnNode: SyntaxNode): SyntaxNode | null {
   return fnNode;
 }
 
-function extensionReceiverType(fnNode: SyntaxNode): string | null {
+export function extensionReceiverType(fnNode: SyntaxNode): string | null {
   for (let i = 0; i < fnNode.namedChildCount; i++) {
     const child = fnNode.namedChild(i);
     if (child === null) continue;
