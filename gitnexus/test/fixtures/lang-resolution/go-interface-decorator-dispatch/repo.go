@@ -27,3 +27,26 @@ func (l *loggingRepo) Count() int { return l.next.Count() }
 type Service struct{ repo Repository }
 
 func (s *Service) Run(id string) error { return s.repo.DeleteItem(id) }
+
+// Node is the control for genuine same-implementation dispatch: a tree walk
+// recurses through an interface-typed parameter or local, either of which can
+// hold another node of the same type, so the edge back into the caller is a
+// real target and is kept.
+type Node interface {
+	Walk(child Node) int
+}
+
+type leafNode struct{}
+
+func (f *leafNode) Walk(child Node) int { return 1 }
+
+type dirNode struct{}
+
+func (d *dirNode) Walk(child Node) int { return child.Walk(nil) }
+
+type linkNode struct{}
+
+func (k *linkNode) Walk(child Node) int {
+	var target Node = child
+	return target.Walk(nil)
+}

@@ -2676,11 +2676,24 @@ describe('Go interface dispatch from a decorator (#2836)', () => {
         `${owningTypeName(result, e.rel.targetId)}.${e.target}:${e.rel.reason}`,
     );
 
-  it('emits no self-loop CALLS edge', () => {
+  it('emits no self-loop CALLS edge from the decorator', () => {
     const selfLoops = getRelationships(result, 'CALLS').filter(
-      (e) => e.rel.sourceId === e.rel.targetId,
+      (e) =>
+        e.rel.sourceId === e.rel.targetId &&
+        owningTypeName(result, e.rel.sourceId) === 'loggingRepo',
     );
     expect(selfLoops).toEqual([]);
+  });
+
+  it('keeps same-implementation dispatch through a parameter or a local', () => {
+    expect(ownedCalls()).toEqual(
+      expect.arrayContaining([
+        'dirNode.Walk → dirNode.Walk:interface-dispatch',
+        'dirNode.Walk → leafNode.Walk:interface-dispatch',
+        'linkNode.Walk → linkNode.Walk:interface-dispatch',
+        'linkNode.Walk → leafNode.Walk:interface-dispatch',
+      ]),
+    );
   });
 
   it('still dispatches from the decorator to the other implementation', () => {

@@ -1594,21 +1594,34 @@ function emitReceiverBoundCallsInPass(
       }
     }
 
-    // A decorator holds its delegate behind the interface it implements, so
-    // `l.next.DeleteItem(id)` inside `loggingRepo.DeleteItem` lists the caller
-    // among the implementations. The self-loop is only real when a decorator
-    // wraps another instance of itself; emitted for every decorator, it reads
-    // as a cycle and makes the method its own caller (#2836).
+    // A decorator holds its delegate in a field of the interface it implements,
+    // so `l.next.DeleteItem(id)` inside `loggingRepo.DeleteItem` lists the
+    // caller among the implementations. The self-loop is only real when a
+    // decorator wraps another instance of itself; emitted for every decorator,
+    // it reads as a cycle and makes the method its own caller (#2836). Only a
+    // field read off a value of the caller's own type is that evidence: through
+    // a parameter or a local, the call back into the same implementation is
+    // ordinary recursion and keeps its edge.
+    const chain = decodeReceiverChain(site.receiverChain);
+    const delegateFieldBase =
+      targetByMemberId.size > 0 && chain?.steps.length === 1 && chain.steps[0]?.kind === 'field'
+        ? chain.baseReceiverName
+        : undefined;
     const callerGraphId =
-      targetByMemberId.size === 0
+      delegateFieldBase === undefined
         ? undefined
         : resolveCallerGraphId(site.callerScope ?? site.inScope, scopes, nodeLookup, site.atRange);
+    const isDecoratorSelfTarget = (member: SymbolDefinition): boolean =>
+      delegateFieldBase !== undefined &&
+      callerGraphId !== undefined &&
+      resolveDefGraphId(member.filePath, member, nodeLookup) === callerGraphId &&
+      member.ownerId !== undefined &&
+      resolveCompoundReceiverClass(delegateFieldBase, site.inScope, scopes, index, {
+        ...compoundOpts,
+        lookupPosition: site.atRange,
+      })?.nodeId === member.ownerId;
     const targets = [...targetByMemberId.values()]
-      .filter(
-        (target) =>
-          callerGraphId === undefined ||
-          resolveDefGraphId(target.member.filePath, target.member, nodeLookup) !== callerGraphId,
-      )
+      .filter((target) => !isDecoratorSelfTarget(target.member))
       .sort(
         (left, right) =>
           left.syntheticOwnerPriority - right.syntheticOwnerPriority ||
